@@ -1,0 +1,60 @@
+{
+  "name": "@9in-io/sdk",
+  "version": "0.3.0",
+  "description": "Official 9in SDK: browser and server-side sign-in with PKCE, token verification, Management API client and adapter handler. Zero dependencies; runs in browsers, Node 18+, Cloudflare Workers, Deno and Bun.",
+  "license": "MIT",
+  "homepage": "https://9in.io/docs/reference/sdk/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/9in-io/sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/9in-io/sdk/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "@9in/source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "@9in/source": "./src/server.ts",
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "keywords": [
+    "oauth",
+    "oidc",
+    "openid-connect",
+    "authentication",
+    "sso",
+    "pkce",
+    "jwt",
+    "9in"
+  ],
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.0"
+  }
+}
