@@ -29,6 +29,8 @@ jobs:
           if [ ! -s notes.md ]; then
             echo "See [CHANGELOG.md](CHANGELOG.md)." > notes.md
           fi
+          # Relative links (MIGRATION.md, README.md#…) point at the files as of this tag.
+          sed -E -i "s#\]\((\./)?([A-Za-z0-9._/-]+\.md)(\#[^)]*)?\)#](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/\2\3)#g" notes.md
           cat notes.md
 
       - name: Publish the release
