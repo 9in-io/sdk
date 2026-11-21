@@ -1,11 +1,43 @@
-# @9in-io/sdk
+9in JavaScript SDK
+==================
 
-Official SDK for [9in](https://9in.io). Zero dependencies; runs in browsers, Node 18+,
-Cloudflare Workers, Deno and Bun.
+<img src="docs/img/logo.png" width="160" alt="9in"/>
+
+Official JavaScript SDK for [9in](https://9in.io): hosted login, OpenID Connect provider and SSO.
+
+`@9in-io/sdk` is the one 9in SDK for JavaScript and TypeScript, and the other 9in JavaScript
+packages are built on it. It has no dependencies and runs in browsers, Node 18+, Cloudflare
+Workers, Deno and Bun.
+
+- **Sign users in from the browser** with `NineAuth`: authorization code flow with PKCE,
+  refresh token rotation and logout against your tenant's OpenID Connect endpoints.
+- **Sign users in from your server** with `WebAppAuth`, using only `fetch` and Web Crypto
+  (Node, Next.js Edge, Workers, Deno and Bun).
+- **Protect your API**: verify access tokens locally against your tenant's JWKS with every
+  algorithm of the key library, and catch revocations at once in hybrid mode.
+- **Manage users** through the Management API: users, sessions, single-use sign-in links and
+  bulk import.
+- **Keep users in your own database** with the adapter protocol v2 (`/authenticate`, `/user`,
+  `/event`) and signed requests and responses.
+- **Receive webhooks**, verify their signature and process each event once.
 
 ```bash
 npm install @9in-io/sdk
 ```
+
+`NineAuth` comes from `@9in-io/sdk`. Everything that runs on your server or needs a client secret
+comes from `@9in-io/sdk/server`. Guides are at [9in.io/docs](https://9in.io/docs/); the
+[SDK reference](https://9in.io/docs/reference/sdk/) lists every method.
+
+| Building with | Use |
+|---|---|
+| React | [`@9in-io/react`](https://github.com/9in-io/react) |
+| Next.js | [`@9in-io/nextjs`](https://github.com/9in-io/nextjs) |
+| Express or other Node.js servers | [`@9in-io/node`](https://github.com/9in-io/node-sdk) |
+| A `<script>` tag, no bundler | [`@9in-io/browser`](https://github.com/9in-io/browser) |
+| PHP or Laravel | [`9in/php-sdk`](https://github.com/9in-io/php-sdk), [`9in/laravel`](https://github.com/9in-io/laravel) |
+
+Moving from SSOfy? Read [Coming from SSOfy](https://9in.io/docs/coming-from-ssofy/).
 
 ## Sign users in (browser)
 
@@ -222,3 +254,21 @@ accepted for `localhost`, `*.localhost` and loopback addresses; for other develo
 
 Every failure is a `NineError` with a `code` (`login_required`, `invalid_token`,
 `insufficient_scope`, `invalid_grant`, `insecure_issuer`, …) and, for HTTP errors, a `status`.
+The codes are listed in the [SDK reference](https://9in.io/docs/reference/sdk/#nineerror-codes).
+
+## Development
+
+```bash
+npm install
+npm test            # vitest (Node 22.12+)
+npm run typecheck
+npm run build       # dist/
+```
+
+This package is developed in 9in's monorepo, where it is tested against the server, and copied
+here at each release (one commit per version). Report bugs in
+[issues](https://github.com/9in-io/sdk/issues).
+
+## License
+
+The MIT License (MIT). See [LICENSE](LICENSE). 9in and SSOfy are by [Cubelet Ltd](https://cubelet.co.uk).

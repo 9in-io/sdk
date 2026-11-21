@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "description": "Official 9in SDK: browser and server-side sign-in with PKCE, token verification, Management API client and adapter handler. Zero dependencies; runs in browsers, Node 18+, Cloudflare Workers, Deno and Bun.",
   "license": "MIT",
+  "author": "9in <support@9in.io>",
   "homepage": "https://9in.io/docs/reference/sdk/",
   "repository": {
     "type": "git",
