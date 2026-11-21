@@ -47,14 +47,14 @@ import { NineAuth } from "@9in-io/sdk";
 const auth = new NineAuth({
   issuer: "https://acme.9in.io",        // or your custom domain
   clientId: "app_7f3k2m9q",
-  redirectUri: `${location.origin}/callback`,
+  redirectUri: `${location.origin}/nine/callback`,
   audience: "https://api.acme.com",     // optional: access tokens for your API
 });
 
 await auth.login();                      // authorization code + PKCE
 await auth.signup();                     // opens the sign-up form (prompt=create)
 
-// on /callback
+// on /nine/callback
 const { user, returnTo } = await auth.handleRedirect();
 
 const token = await auth.getAccessToken();   // refreshed (and rotated) automatically
@@ -75,14 +75,14 @@ const auth = new WebAppAuth({
   issuer: "https://acme.9in.io",
   clientId: process.env.NINE_CLIENT_ID!,
   clientSecret: process.env.NINE_CLIENT_SECRET, // confidential apps; leave out for public ones
-  redirectUri: "https://app.acme.com/auth/callback",
+  redirectUri: "https://app.acme.com/nine/callback",
 });
 
-// /auth/login
+// /nine/login
 const { url, transaction } = await auth.createLogin({ returnTo: "/dashboard" });
 // store `transaction` (encrypted, ~15 minutes), then redirect to `url`
 
-// /auth/callback
+// /nine/callback
 const { tokens, claims, returnTo } = await auth.handleCallback(request.url, transaction);
 // claims: the verified ID token (sub, email, name, amr…); tokens: access, refresh, ID token
 
@@ -159,7 +159,7 @@ await nine.revokeSession(sessions[0].sid);
 await nine.revokeUserSessions(userId);
 
 // Single-use sign-in link (magic links, moving a signed-in user from your app to 9in)
-const { url } = await nine.createLoginLink(userId, { returnTo: "https://app.acme.com/callback", ttlSeconds: 600 });
+const { url } = await nine.createLoginLink(userId, { returnTo: "https://app.acme.com/nine/callback", ttlSeconds: 600 });
 
 // Bulk import (500 per call): old ids, password hashes (bcrypt, argon2, PBKDF2, Firebase scrypt), social identities
 const { results } = await nine.importUsers(
@@ -222,7 +222,7 @@ export default {
 ```
 
 It reads the body, so pass `request.clone()` if you need it again. Behind a proxy that
-rewrites the URL, pass the path 9in posted to: `verifyWebhook(secret, request, { path: "/hooks/9in" })`.
+rewrites the URL, pass the path 9in posted to: `verifyWebhook(secret, request, { path: "/nine/webhook" })`.
 Several secrets (`[newSecret, oldSecret]`) are accepted while you rotate.
 
 ### Process each event once
