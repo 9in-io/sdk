@@ -1,6 +1,6 @@
 {
   "name": "@9in-io/sdk",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Official 9in SDK: browser and server-side sign-in with PKCE, token verification, Management API client and adapter handler. Zero dependencies; runs in browsers, Node 18+, Cloudflare Workers, Deno and Bun.",
   "license": "MIT",
   "author": "9in <support@9in.io>",

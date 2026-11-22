@@ -125,7 +125,7 @@ describe("WebAppAuth", () => {
     const stale: LoginTransaction = { ...transaction, createdAt: Date.now() - 16 * 60_000 };
     await expect(auth.handleCallback(cb(`code=code-1&state=${transaction.state}`), stale)).rejects.toMatchObject({ code: "invalid_state" });
     const tampered: LoginTransaction = { ...transaction, nonce: "other" };
-    await expect(auth.handleCallback(cb(`code=code-1&state=${transaction.state}`), tampered)).rejects.toMatchObject({ code: "invalid_token" });
+    await expect(auth.handleCallback(cb(`code=code-1&state=${transaction.state}`), tampered)).rejects.toMatchObject({ code: "invalid_id_token", status: 401 });
   });
 });
 
@@ -142,5 +142,38 @@ describe("verifyIdToken", () => {
     await expect(verifyIdToken(await t.idToken({}, { typ: "at+jwt" }), options)).rejects.toThrow("not an ID token");
     const token = await t.idToken({});
     await expect(verifyIdToken(`${token.slice(0, -4)}AAAA`, options)).rejects.toThrow();
+  });
+
+  it("throws invalid_id_token for every failure", async () => {
+    const t = await tenant();
+    const options = { issuer: t.issuer, clientId: "app_1", fetch: t.fetcher };
+    const token = await t.idToken({});
+    const failures: [string | undefined, Record<string, unknown>?, Record<string, unknown>?][] = [
+      [undefined],
+      ["not-a-jwt"],
+      [`${token.slice(0, -4)}AAAA`],
+      [undefined, { aud: "other" }],
+      [undefined, { iss: "https://evil.test" }],
+      [undefined, { exp: Math.floor(Date.now() / 1000) - 120 }],
+      [undefined, {}, { typ: "at+jwt" }],
+      [undefined, {}, { kid: "unknown" }],
+    ];
+    for (const [raw, claims, header] of failures) {
+      const input = claims ? await t.idToken(claims, header) : raw;
+      await expect(verifyIdToken(input, options)).rejects.toMatchObject({ code: "invalid_id_token", status: 401 });
+    }
+  });
+
+  it("refuses HMAC-signed ID tokens: 9in signs them with an asymmetric key", async () => {
+    const t = await tenant();
+    const secret = "a-shared-secret-of-at-least-32-bytes!";
+    const now = Math.floor(Date.now() / 1000);
+    const input = `${b64json({ alg: "HS256", typ: "JWT" })}.${b64json({ iss: t.issuer, aud: "app_1", sub: "usr_1", iat: now, exp: now + 300 })}`;
+    const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    const sig = new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(input)));
+    const hs = `${input}.${base64UrlEncode(sig)}`;
+    // Even with the secret passed (the removed `secret` option, from untyped code).
+    const options = { issuer: t.issuer, clientId: "app_1", fetch: t.fetcher, secret } as Parameters<typeof verifyIdToken>[1];
+    await expect(verifyIdToken(hs, options)).rejects.toMatchObject({ code: "invalid_id_token", message: expect.stringContaining("HMAC") });
   });
 });

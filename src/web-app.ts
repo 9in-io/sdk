@@ -24,8 +24,6 @@ export interface WebAppAuthOptions {
   scope?: string;
   /** An API identifier, to get access tokens for that API. */
   audience?: string;
-  /** Only for tenants that sign with a shared (HMAC) key. */
-  idTokenSecret?: string;
   fetch?: typeof fetch;
   /** Allows http:// issuers other than localhost (never in production). */
   allowInsecureIssuer?: boolean;
@@ -145,7 +143,6 @@ export class WebAppAuth {
       issuer: this.issuer,
       clientId: this.options.clientId,
       nonce: transaction.nonce,
-      secret: this.options.idTokenSecret,
       fetch: this.fetcher,
       allowInsecureIssuer: this.options.allowInsecureIssuer,
     });

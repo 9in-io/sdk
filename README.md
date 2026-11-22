@@ -129,7 +129,7 @@ const claims = await verifier.verify(bearer, { scope: "orders:read" });
 
 // Webhook endpoint subscribed to token.revoked, session.revoked and user.* events
 const event = await verifyWebhook(process.env.NINE_WEBHOOK_SECRET, request);
-verifier.handleEvent(event);
+await verifier.handleEvent(event);
 ```
 
 | Mode | What it does |
@@ -139,8 +139,36 @@ verifier.handleEvent(event);
 | `introspect` | Introspection on every call. |
 
 Opaque access tokens (`9in_at_…`, enabled per tenant or per API) are always introspected,
-and cached in hybrid mode. The cache is in memory, per process. Each process needs the
-webhook events, or a short `cacheTtl`.
+and cached in hybrid mode.
+
+#### Several instances: a shared store
+
+By default the cache is in memory, per instance, so a webhook only reaches the instance that
+receives it. With several processes or serverless instances, pass a `store` every instance
+shares: the instance that gets the webhook writes a small revocation marker (for the token's
+`jti`, the session's `sid` or the user), and every instance checks the markers before trusting
+a cached answer.
+
+```ts
+import { createClient } from "redis";
+import type { Store } from "@9in-io/sdk/server";
+
+const redis = await createClient({ url: process.env.REDIS_URL }).connect();
+const store: Store = {
+  get: (key) => redis.get(key),
+  set: async (key, value, ttlSeconds) => void (await redis.set(key, value, { EX: ttlSeconds })),
+  add: async (key, value, ttlSeconds) => (await redis.set(key, value, { NX: true, EX: ttlSeconds })) === "OK",
+  delete: async (key) => void (await redis.del(key)),
+  getMany: (keys) => redis.mGet(keys), // optional: one round trip for the markers
+};
+
+const verifier = createTokenVerifier({ issuer, audience, clientId, clientSecret, store });
+```
+
+The store needs read-after-write consistency: Redis, a Durable Object, D1 or your database,
+not Workers KV. When it can't be read, the verifier asks 9in; when a revocation can't be
+written, `handleEvent` rejects, so answer the webhook with a 5xx and 9in delivers it again. The
+same store can serve `processEventOnce`.
 
 ## Manage users (server)
 

@@ -159,8 +159,6 @@ export interface VerifyIdTokenOptions {
   clientId: string;
   /** The nonce sent with the sign-in request. */
   nonce?: string | null;
-  /** For tenants whose signing key is a shared (HMAC) secret. */
-  secret?: string;
   /** Seconds of clock skew allowed (default 30). */
   clockTolerance?: number;
   fetch?: typeof fetch;
@@ -187,55 +185,50 @@ export interface IdTokenClaims {
 }
 
 /**
- * Verifies an ID token from your tenant: signature (JWKS, or the shared secret for HMAC keys),
- * issuer, audience (your client ID; `azp` when there are several), expiry and nonce.
+ * Verifies an ID token from your tenant: signature (against the JWKS; 9in signs ID tokens with the
+ * tenant's default asymmetric key, never HMAC), issuer, audience (your client ID; `azp` when
+ * there are several), expiry and nonce. Every failure throws `invalid_id_token` (401).
  */
 export async function verifyIdToken(token: string | null | undefined, options: VerifyIdTokenOptions): Promise<IdTokenClaims> {
-  if (!token) throw new NineError("invalid_token", "missing ID token", 401);
+  const fail = (message: string) => new NineError("invalid_id_token", message, 401);
+  if (!token) throw fail("missing ID token");
   const fetcher = options.fetch ?? fetch.bind(globalThis);
   const issuer = normalizeIssuer(options.issuer, options.allowInsecureIssuer);
   let parts;
   try {
     parts = decodeJwt(token);
   } catch {
-    throw new NineError("invalid_token", "malformed ID token", 401);
+    throw fail("malformed ID token");
   }
   const { header, payload, signingInput, signature } = parts;
   const alg = String(header.alg);
   // An access token is never accepted as an ID token.
-  if (ACCESS_TOKEN_TYPES.has(String(header.typ ?? "").toLowerCase())) throw new NineError("invalid_token", "not an ID token", 401);
-  let valid: boolean;
-  if (HMAC_HASH[alg]) {
-    if (!options.secret) throw new NineError("invalid_token", "HMAC-signed ID token: pass the tenant's shared secret", 401);
-    const key = await crypto.subtle.importKey("raw", utf8(options.secret), { name: "HMAC", hash: HMAC_HASH[alg] }, false, ["verify"]);
-    valid = await crypto.subtle.verify("HMAC", key, signature, utf8(signingInput));
-  } else if (ALGORITHMS[alg]) {
-    const jwk = await findKey(issuer, header.kid, fetcher);
-    if (!jwk) throw new NineError("invalid_token", "unknown signing key", 401);
-    if (jwk.alg && jwk.alg !== alg) throw new NineError("invalid_token", "algorithm does not match the key", 401);
-    valid = await crypto.subtle.verify(ALGORITHMS[alg]!.verify, await importPublicKey(jwk, alg), signature, utf8(signingInput));
-  } else {
-    throw new NineError("invalid_token", "unsupported algorithm", 401);
-  }
-  if (!valid) throw new NineError("invalid_token", "bad signature", 401);
-  checkClaims(payload, issuer, { issuer, audience: options.clientId, clockTolerance: options.clockTolerance });
+  if (ACCESS_TOKEN_TYPES.has(String(header.typ ?? "").toLowerCase())) throw fail("not an ID token");
+  if (HMAC_HASH[alg]) throw fail("HMAC-signed ID token: 9in signs ID tokens with an asymmetric key");
+  if (!ALGORITHMS[alg]) throw fail("unsupported algorithm");
+  const jwk = await findKey(issuer, header.kid, fetcher);
+  if (!jwk) throw fail("unknown signing key");
+  if (jwk.alg && jwk.alg !== alg) throw fail("algorithm does not match the key");
+  const valid = await crypto.subtle.verify(ALGORITHMS[alg]!.verify, await importPublicKey(jwk, alg), signature, utf8(signingInput));
+  if (!valid) throw fail("bad signature");
+  checkClaims(payload, issuer, { issuer, audience: options.clientId, clockTolerance: options.clockTolerance }, "invalid_id_token");
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (aud.length > 1 && payload.azp !== options.clientId) throw new NineError("invalid_token", "authorized party mismatch", 401);
-  if (options.nonce !== undefined && options.nonce !== null && payload.nonce !== options.nonce) throw new NineError("invalid_token", "nonce mismatch", 401);
-  if (typeof payload.sub !== "string" || !payload.sub) throw new NineError("invalid_token", "missing subject", 401);
+  if (aud.length > 1 && payload.azp !== options.clientId) throw fail("authorized party mismatch");
+  if (options.nonce !== undefined && options.nonce !== null && payload.nonce !== options.nonce) throw fail("nonce mismatch");
+  if (typeof payload.sub !== "string" || !payload.sub) throw fail("missing subject");
   return payload as IdTokenClaims;
 }
 
-function checkClaims(payload: Record<string, unknown>, issuer: string, options: VerifyOptions): void {
+function checkClaims(payload: Record<string, unknown>, issuer: string, options: VerifyOptions, code = "invalid_token"): void {
   const now = Math.floor(Date.now() / 1000);
   const skew = options.clockTolerance ?? 30;
-  if (String(payload.iss).replace(/\/$/, "") !== issuer) throw new NineError("invalid_token", "issuer mismatch", 401);
-  if (typeof payload.exp !== "number" || payload.exp + skew < now) throw new NineError("invalid_token", "token expired", 401);
-  if (typeof payload.nbf === "number" && payload.nbf - skew > now) throw new NineError("invalid_token", "token not yet valid", 401);
+  if (String(payload.iss).replace(/\/$/, "") !== issuer) throw new NineError(code, "issuer mismatch", 401);
+  if (typeof payload.exp !== "number" || payload.exp + skew < now) throw new NineError(code, "token expired", 401);
+  if (typeof payload.nbf === "number" && payload.nbf - skew > now) throw new NineError(code, "token not yet valid", 401);
   if (options.audience) {
     const wanted = Array.isArray(options.audience) ? options.audience : [options.audience];
     const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    if (!wanted.some((a) => aud.includes(a))) throw new NineError("invalid_token", "audience mismatch", 401);
+    if (!wanted.some((a) => aud.includes(a))) throw new NineError(code, "audience mismatch", 401);
   }
   checkScope(payload, options.scope);
 }
@@ -268,8 +261,21 @@ export interface TokenVerifierOptions extends Omit<VerifyOptions, "scope"> {
   clientSecret?: string;
   /** Longest time a hybrid answer is trusted without hearing from 9in, in seconds (default 300). */
   cacheTtl?: number;
-  /** Most tokens kept in the cache (default 10 000; the least recently used go first). */
+  /** Most tokens kept in the in-memory cache (default 10 000; the least recently used go first). */
   cacheSize?: number;
+  /**
+   * A store shared by every instance of your API (Redis, a Durable Object, D1, your
+   * database), for hybrid answers and revocations. Without it each instance keeps its own
+   * answers, so a revocation webhook only reaches the instance that receives it and the
+   * others trust their answer for up to `cacheTtl`. With it, the instance that gets the
+   * webhook writes a small revocation marker (for the token's `jti`, the session's `sid` or
+   * the user) that every instance checks before trusting a cached answer. The same store
+   * can serve `processEventOnce`.
+   *
+   * It needs read-after-write consistency: Workers KV, which is eventually consistent, can
+   * delay a revocation by up to a minute. When the store can't be read, the verifier asks 9in.
+   */
+  store?: Store;
 }
 
 interface CacheEntry {
@@ -278,17 +284,32 @@ interface CacheEntry {
   until: number;
 }
 
+/** A hybrid answer as kept in a shared store (times in ms). */
+interface StoredAnswer {
+  /** The claims, or null when 9in said the token is not active. */
+  c: AccessTokenClaims | null;
+  /** Ask 9in again after this. */
+  u: number;
+  /** When 9in was asked. */
+  t: number;
+}
+
 export interface TokenVerifier {
   /** Verifies a bearer token (JWT or opaque) and returns its claims, or throws `NineError`. */
   verify(token: string | null | undefined, options?: { scope?: string | string[] }): Promise<AccessTokenClaims>;
   /**
-   * Drops cached answers a webhook event makes stale; returns how many. Pass events from
-   * `verifyWebhook` (subscribe the endpoint to token.revoked, session.revoked,
-   * user.sessions_revoked, user.updated and user.deleted).
+   * Drops cached answers a webhook event makes stale. Pass events from `verifyWebhook`
+   * (subscribe the endpoint to token.revoked, session.revoked, user.sessions_revoked,
+   * user.updated, user.deleted and user.password_changed).
+   *
+   * Resolves to how many answers it dropped from the in-memory cache, or, with a shared
+   * `store`, 1 when it wrote a revocation marker (the answers it covers can't be counted).
+   * Rejects when the store can't be written: answer the webhook with a 5xx so 9in delivers
+   * it again.
    */
-  handleEvent(event: { event_type: string; data: Record<string, unknown> }): number;
-  /** Forgets every cached answer. */
-  clear(): void;
+  handleEvent(event: { event_type: string; data: Record<string, unknown> }): Promise<number>;
+  /** Forgets every cached answer (in every instance, with a shared `store`). */
+  clear(): Promise<void>;
 }
 
 const OPAQUE_PREFIX = "9in_at_";
@@ -315,6 +336,14 @@ export function createTokenVerifier(options: TokenVerifierOptions): TokenVerifie
   const size = options.cacheSize ?? 10_000;
   const cache = new Map<string, CacheEntry>();
   const inflight = new Map<string, Promise<AccessTokenClaims | null>>();
+  const store = options.store;
+  // Clocks of different instances disagree a little: an answer dated within this of a
+  // revocation is treated as older than it.
+  const skew = (options.clockTolerance ?? 30) * 1000;
+  // A marker must outlive every positive answer cached before it.
+  const markerTtl = Math.ceil((ttl + skew) / 1000) + 60;
+  let prefixPromise: Promise<string> | undefined;
+  const prefix = () => (prefixPromise ??= cacheKey(issuer).then((hash) => `9in:hybrid:${hash.slice(0, 12)}:`));
 
   if (mode !== "local" && (!options.clientId || !options.clientSecret)) {
     throw new NineError("invalid_options", `${mode} mode needs clientId and clientSecret (a confidential application) for introspection`);
@@ -339,16 +368,74 @@ export function createTokenVerifier(options: TokenVerifierOptions): TokenVerifie
     while (cache.size > size) cache.delete(cache.keys().next().value!);
   }
 
+  async function readMany(keys: string[]): Promise<(string | null)[]> {
+    if (store!.getMany) {
+      const values = await store!.getMany(keys);
+      if (values.length !== keys.length) throw new Error("getMany returned the wrong number of values");
+      return values;
+    }
+    return Promise.all(keys.map((key) => store!.get(key)));
+  }
+
+  /**
+   * A shared-store answer, unless it is missing, expired or older than a revocation marker
+   * for its jti, sid or user (or the "clear everything" marker). A store failure or an
+   * unreadable entry is a miss: ask 9in rather than trust what can't be checked.
+   */
+  async function storedAnswer(key: string): Promise<CacheEntry | undefined> {
+    try {
+      const p = await prefix();
+      const raw = await store!.get(`${p}a:${key}`);
+      if (!raw) return undefined;
+      const answer = JSON.parse(raw) as StoredAnswer;
+      if (typeof answer.u !== "number" || typeof answer.t !== "number" || answer.u <= Date.now()) return undefined;
+      if (!answer.c) return { claims: null, until: answer.u }; // a refusal stands until it expires
+      const claims = answer.c;
+      const markers = [`${p}r:*`];
+      for (const name of ["jti", "sid", "sub"] as const) {
+        const value = claims[name];
+        if (typeof value === "string" && value) markers.push(`${p}r:${name}:${value}`);
+      }
+      for (const marker of await readMany(markers)) {
+        if (marker == null) continue;
+        const at = Number(marker);
+        if (!Number.isFinite(at) || answer.t <= at + skew) return undefined;
+      }
+      return { claims, until: answer.u };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Best effort: an answer that can't be stored only costs another introspection. */
+  async function storeAnswer(key: string, entry: CacheEntry, asked: number) {
+    try {
+      const seconds = Math.ceil((entry.until - Date.now()) / 1000);
+      if (seconds <= 0) return;
+      const answer: StoredAnswer = { c: entry.claims, u: entry.until, t: asked };
+      await store!.set(`${await prefix()}a:${key}`, JSON.stringify(answer), seconds);
+    } catch {
+      // ignored
+    }
+  }
+
+  async function mark(name: string): Promise<void> {
+    await store!.set(`${await prefix()}r:${name}`, String(Date.now()), markerTtl);
+  }
+
   /** The live claims (`local` for a JWT, once 9in confirms it is active), or null when revoked. */
   async function lookup(token: string, local: AccessTokenClaims | null): Promise<AccessTokenClaims | null> {
     const key = await cacheKey(token);
     if (mode === "hybrid") {
-      const hit = cache.get(key);
+      const hit = store ? await storedAnswer(key) : cache.get(key);
       if (hit && hit.until > Date.now()) {
-        remember(key, hit); // most recently used
+        if (!store) remember(key, hit); // most recently used
         return hit.claims;
       }
     }
+    // When 9in was asked, not when it answered: a revocation that lands while the request
+    // is in flight must still make this answer stale.
+    const asked = Date.now();
     let pending = inflight.get(key);
     if (!pending) {
       pending = introspect(token).finally(() => inflight.delete(key));
@@ -360,7 +447,10 @@ export function createTokenVerifier(options: TokenVerifierOptions): TokenVerifie
       const expiry = (claims?.exp ?? local?.exp ?? 0) * 1000;
       // A revoked token never comes back: remember the refusal until it expires.
       const until = claims ? Math.min(Date.now() + ttl, expiry) : expiry ? expiry : Date.now() + 60_000;
-      if (until > Date.now()) remember(key, { claims, until });
+      if (until > Date.now()) {
+        if (store) await storeAnswer(key, { claims, until }, asked);
+        else remember(key, { claims, until });
+      }
     }
     return claims;
   }
@@ -378,19 +468,24 @@ export function createTokenVerifier(options: TokenVerifierOptions): TokenVerifie
       return claims;
     },
 
-    handleEvent(event) {
-      const data = event.data ?? {};
+    async handleEvent(event) {
+      const data = event?.data ?? {};
       const userId = (data.user as { id?: unknown } | null | undefined)?.id;
-      let match: ((claims: AccessTokenClaims) => boolean) | null = null;
-      if (event.event_type === "token.revoked" && data.token_type === "access_token" && data.jti) match = (c) => c.jti === data.jti;
-      else if (event.event_type === "session.revoked" && data.sid) match = (c) => c.sid === data.sid;
-      else if (["user.sessions_revoked", "user.deleted", "user.updated", "user.password_changed"].includes(event.event_type) && typeof userId === "string") {
-        match = (c) => c.sub === userId;
+      let target: ["jti" | "sid" | "sub", string] | null = null;
+      if (event?.event_type === "token.revoked" && data.token_type === "access_token" && typeof data.jti === "string" && data.jti) target = ["jti", data.jti];
+      else if (event?.event_type === "session.revoked" && typeof data.sid === "string" && data.sid) target = ["sid", data.sid];
+      else if (["user.sessions_revoked", "user.deleted", "user.updated", "user.password_changed"].includes(event?.event_type) && typeof userId === "string" && userId) {
+        target = ["sub", userId];
       }
-      if (!match) return 0;
+      if (!target) return 0;
+      const [name, value] = target;
+      if (store) {
+        await mark(`${name}:${value}`);
+        return 1;
+      }
       let evicted = 0;
       for (const [key, entry] of cache) {
-        if (entry.claims && match(entry.claims)) {
+        if (entry.claims && entry.claims[name] === value) {
           cache.delete(key);
           evicted++;
         }
@@ -398,8 +493,9 @@ export function createTokenVerifier(options: TokenVerifierOptions): TokenVerifie
       return evicted;
     },
 
-    clear() {
-      cache.clear();
+    async clear() {
+      if (store) await mark("*");
+      else cache.clear();
     },
   };
 }
@@ -786,18 +882,28 @@ export async function verifyWebhook(secret: string | string[], request: Request,
 // Processing each event once
 
 /**
- * Key-value store for `processEventOnce`. `add` must be atomic (insert only when the key is
- * absent or expired): use a Durable Object, D1/SQL with a unique key, or Redis `SET NX EX`.
- * Workers KV is eventually consistent and not suitable.
+ * A small key-value store with expiry, for state the SDK shares across requests and, with a
+ * shared implementation, across instances: processed webhook ids (`processEventOnce`) and
+ * hybrid answers with their revocation markers (`createTokenVerifier({ store })`).
+ *
+ * `add` must be atomic (insert only when the key is absent or expired): use a Durable
+ * Object, D1/SQL with a unique key, or Redis `SET NX EX`. Workers KV is eventually consistent
+ * and not suitable. A store that drops keys early under memory pressure (Redis with an
+ * allkeys eviction policy) can let a webhook be handled twice.
  */
 export interface EventStore {
   add(key: string, value: string, ttlSeconds: number): Promise<boolean>;
   get(key: string): Promise<string | null>;
   set(key: string, value: string, ttlSeconds: number): Promise<void>;
   delete(key: string): Promise<void>;
+  /** Optional: several keys in one round trip (Redis `MGET`), `null` for missing ones. */
+  getMany?(keys: string[]): Promise<(string | null)[]>;
 }
 
-/** In-memory EventStore: one process only (tests, single-instance servers). */
+/** The key-value store the SDK keeps shared state in: the same interface as `EventStore`. */
+export type Store = EventStore;
+
+/** In-memory store: one process only (tests, single-instance servers). */
 export class MemoryEventStore implements EventStore {
   private readonly items = new Map<string, { value: string; expiresAt: number }>();
 

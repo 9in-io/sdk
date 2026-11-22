@@ -225,8 +225,8 @@ describe("createTokenVerifier (hybrid)", () => {
     await expect(verifier.verify(token, { scope: "admin" })).rejects.toMatchObject({ code: "insufficient_scope" });
 
     revoked.add(token);
-    expect(verifier.handleEvent({ event_type: "token.revoked", data: { token_type: "refresh_token", sid: "sid_1" } })).toBe(0);
-    expect(verifier.handleEvent({ event_type: "token.revoked", data: { token_type: "access_token", jti: "j1" } })).toBe(1);
+    expect(await verifier.handleEvent({ event_type: "token.revoked", data: { token_type: "refresh_token", sid: "sid_1" } })).toBe(0);
+    expect(await verifier.handleEvent({ event_type: "token.revoked", data: { token_type: "access_token", jti: "j1" } })).toBe(1);
     await expect(verifier.verify(token)).rejects.toThrow(/revoked/);
     await expect(verifier.verify(token)).rejects.toThrow(/revoked/);
     expect(introspections).toHaveLength(2); // the refusal is remembered
@@ -239,11 +239,11 @@ describe("createTokenVerifier (hybrid)", () => {
     const b = await sign(claims({ jti: "b", sid: "sid_2" }));
     await verifier.verify(a);
     await verifier.verify(b);
-    expect(verifier.handleEvent({ event_type: "session.revoked", data: { sid: "sid_2", user: { id: "usr_1" } } })).toBe(1);
-    expect(verifier.handleEvent({ event_type: "user.sessions_revoked", data: { count: 1, user: { id: "usr_1" } } })).toBe(1);
-    expect(verifier.handleEvent({ event_type: "user.login", data: { user: { id: "usr_1" } } })).toBe(0);
+    expect(await verifier.handleEvent({ event_type: "session.revoked", data: { sid: "sid_2", user: { id: "usr_1" } } })).toBe(1);
+    expect(await verifier.handleEvent({ event_type: "user.sessions_revoked", data: { count: 1, user: { id: "usr_1" } } })).toBe(1);
+    expect(await verifier.handleEvent({ event_type: "user.login", data: { user: { id: "usr_1" } } })).toBe(0);
     // The old shape no longer evicts anything.
-    expect(verifier.handleEvent({ event_type: "user.deleted", data: { userId: "usr_1" } })).toBe(0);
+    expect(await verifier.handleEvent({ event_type: "user.deleted", data: { userId: "usr_1" } })).toBe(0);
     await verifier.verify(a);
     expect(introspections).toHaveLength(3);
   });
@@ -268,6 +268,222 @@ describe("createTokenVerifier (hybrid)", () => {
     await strict.verify(token);
     expect(introspections).toHaveLength(2);
     expect(() => createTokenVerifier({ issuer: options.issuer })).toThrow(/clientId and clientSecret/);
+  });
+
+  describe("with a shared store (several instances)", () => {
+    afterEach(() => vi.useRealTimers());
+    const clock = () => vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    const later = (ms: number) => vi.setSystemTime(Date.now() + ms);
+
+    /** A store that can fail, and counts what it's asked. */
+    class TestStore extends MemoryEventStore {
+      gets = 0;
+      failGet = false;
+      failSet = false;
+      override async get(key: string) {
+        this.gets++;
+        if (this.failGet) throw new Error("redis down");
+        return super.get(key);
+      }
+      override async set(key: string, value: string, ttl: number) {
+        if (this.failSet) throw new Error("redis down");
+        return super.set(key, value, ttl);
+      }
+    }
+
+    async function shared(store: MemoryEventStore = new TestStore()) {
+      const revoked = new Set<string>();
+      let onIntrospect: (() => Promise<void>) | undefined;
+      const env = await setup((token) => (revoked.has(token) ? { active: false } : { active: true, token_type: "access_token", ...env.claims() }));
+      const wrapped = env.options.fetch;
+      const fetcher: typeof fetch = async (input, init) => {
+        const response = await wrapped(input, init);
+        if (String(input instanceof Request ? input.url : input).endsWith("/oauth/introspect") && onIntrospect) {
+          const hook = onIntrospect;
+          onIntrospect = undefined;
+          await hook();
+        }
+        return response;
+      };
+      const options = { ...env.options, fetch: fetcher, store };
+      return { ...env, store, revoked, a: createTokenVerifier(options), b: createTokenVerifier(options), options, during: (hook: () => Promise<void>) => (onIntrospect = hook) };
+    }
+
+    it("shares answers, and a webhook received by one instance reaches the others", async () => {
+      clock();
+      const { a, b, sign, claims, introspections, revoked } = await shared();
+      const cases: [Record<string, unknown>, { event_type: string; data: Record<string, unknown> }][] = [
+        [{ jti: "jx", sid: "sx", sub: "ux" }, { event_type: "token.revoked", data: { token_type: "access_token", jti: "jx" } }],
+        [{ jti: "jy", sid: "sy", sub: "uy" }, { event_type: "session.revoked", data: { sid: "sy" } }],
+        [{ jti: "jz", sid: "sz", sub: "uz" }, { event_type: "user.deleted", data: { user: { id: "uz" } } }],
+      ];
+      for (const [extra, event] of cases) {
+        const token = await sign(claims(extra));
+        const before = introspections.length;
+        await a.verify(token);
+        await b.verify(token, { scope: "orders:read" });
+        expect(introspections.length).toBe(before + 1); // one introspection for both instances
+        later(60_000); // well past the allowed clock skew
+        revoked.add(token);
+        await a.verify(token); // still trusted: no webhook yet
+        expect(await b.handleEvent(event)).toBe(1);
+        await expect(a.verify(token)).rejects.toThrow(/revoked/);
+      }
+    });
+
+    it("markers only touch their own tokens, and fresh answers are trusted again", async () => {
+      clock();
+      const { a, b, sign, claims, introspections } = await shared();
+      const mine = await sign(claims({ jti: "j1", sid: "s1", sub: "u1" }));
+      const other = await sign(claims({ jti: "j2", sid: "s2", sub: "u2" }));
+      await a.verify(mine);
+      await a.verify(other);
+      later(60_000);
+      expect(await b.handleEvent({ event_type: "session.revoked", data: { sid: "s1" } })).toBe(1);
+      const before = introspections.length;
+      await a.verify(other);
+      expect(introspections.length).toBe(before);
+      await a.verify(mine);
+      expect(introspections.length).toBe(before + 1);
+      later(60_000);
+      await a.verify(mine);
+      await b.verify(mine);
+      expect(introspections.length).toBe(before + 2);
+      for (const event of [
+        { event_type: "token.revoked", data: { token_type: "refresh_token", jti: "j1" } },
+        { event_type: "user.login", data: { user: { id: "u1" } } },
+        { event_type: "session.revoked", data: {} },
+        { event_type: "session.revoked", data: { sid: 42 } },
+      ]) {
+        expect(await b.handleEvent(event)).toBe(0);
+      }
+    });
+
+    it("clear() reaches every instance", async () => {
+      clock();
+      const { a, b, sign, claims, introspections } = await shared();
+      const token = await sign(claims());
+      await a.verify(token);
+      later(60_000);
+      await b.clear();
+      await a.verify(token);
+      expect(introspections).toHaveLength(2);
+    });
+
+    it("allows for clocks that disagree", async () => {
+      clock();
+      const { a, b, sign, claims, introspections } = await shared();
+      const token = await sign(claims({ sid: "skew" }));
+      await b.handleEvent({ event_type: "session.revoked", data: { sid: "skew" } });
+      later(10_000); // within the 30-second tolerance
+      await a.verify(token);
+      await a.verify(token);
+      expect(introspections).toHaveLength(2);
+    });
+
+    it("a revocation during the introspection request still makes the answer stale", async () => {
+      clock();
+      const { a, b, sign, claims, revoked, during } = await shared();
+      const token = await sign(claims({ jti: "race" }));
+      during(async () => {
+        later(60_000);
+        await b.handleEvent({ event_type: "token.revoked", data: { token_type: "access_token", jti: "race" } });
+      });
+      await a.verify(token); // 9in said active, then the revocation landed before it was cached
+      revoked.add(token);
+      await expect(a.verify(token)).rejects.toThrow(/revoked/);
+    });
+
+    it("shares refusals and keeps answers for cacheTtl at most", async () => {
+      clock();
+      const { a, b, sign, claims, introspections, revoked } = await shared();
+      const gone = await sign(claims({ jti: "gone" }));
+      revoked.add(gone);
+      for (const v of [a, b, a]) await expect(v.verify(gone)).rejects.toThrow(/revoked/);
+      expect(introspections).toHaveLength(1);
+      const token = await sign(claims({ jti: "ttl", exp: Math.floor(Date.now() / 1000) + 3600 }));
+      await a.verify(token);
+      later(4 * 60_000);
+      await b.verify(token);
+      later(2 * 60_000);
+      await b.verify(token);
+      expect(introspections).toHaveLength(3);
+    });
+
+    it("opaque tokens survive the round trip through the store", async () => {
+      const { a, b, introspections } = await shared();
+      await expect(a.verify("9in_at_shared", { scope: "orders:read" })).resolves.toMatchObject({ sub: "usr_1" });
+      await expect(b.verify("9in_at_shared", { scope: "orders:read" })).resolves.toMatchObject({ sub: "usr_1", sid: "sid_1" });
+      await expect(b.verify("9in_at_shared", { scope: "orders:write" })).rejects.toMatchObject({ code: "insufficient_scope" });
+      expect(introspections).toHaveLength(1);
+    });
+
+    it("treats store failures and unreadable entries as misses, and reports failed revocations", async () => {
+      const store = new TestStore();
+      const { a, b, sign, claims, introspections } = await shared(store);
+      const token = await sign(claims());
+      store.failSet = true; // can't cache: every check asks 9in, and works
+      await a.verify(token);
+      await a.verify(token);
+      store.failSet = false;
+      await a.verify(token);
+      store.failGet = true; // can't read: ask 9in rather than trust nothing
+      await a.verify(token);
+      expect(introspections).toHaveLength(4);
+      store.failGet = false;
+      store.failSet = true;
+      await expect(b.handleEvent({ event_type: "session.revoked", data: { sid: "sid_1" } })).rejects.toThrow(/redis down/);
+      await expect(b.clear()).rejects.toThrow(/redis down/);
+      store.failSet = false;
+      // Corrupt the stored answer, then write an unreadable marker: both are misses.
+      const keys = [...(store as unknown as { items: Map<string, unknown> }).items.keys()];
+      const answerKey = keys.find((k) => /^9in:hybrid:[0-9a-f]{12}:a:/.test(k))!;
+      const prefix = answerKey.slice(0, answerKey.indexOf("a:"));
+      await store.set(answerKey, "{not json", 3600);
+      await a.verify(token);
+      await store.set(`${prefix}r:sid:sid_1`, "garbage", 3600);
+      await a.verify(token);
+      expect(introspections).toHaveLength(6);
+    });
+
+    it("reads markers with getMany when the store has it", async () => {
+      clock();
+      class MultiStore extends TestStore {
+        many = 0;
+        async getMany(keys: string[]) {
+          this.many++;
+          return Promise.all(keys.map((k) => super.get(k)));
+        }
+      }
+      const store = new MultiStore();
+      const { a, b, sign, claims } = await shared(store);
+      const token = await sign(claims());
+      await a.verify(token);
+      later(60_000);
+      store.gets = 0;
+      await b.verify(token);
+      expect(store.many).toBe(1);
+      expect(store.gets).toBe(1 + 4); // the answer, plus getMany's own reads (all, jti, sid, sub)
+      const plain = new TestStore();
+      const p = await shared(plain);
+      const other = await p.sign(p.claims());
+      await p.a.verify(other);
+      later(60_000);
+      plain.gets = 0;
+      await p.b.verify(other);
+      expect(plain.gets).toBe(5);
+    });
+
+    it("keeps tenants apart in one store", async () => {
+      const store = new MemoryEventStore();
+      const one = await shared(store);
+      const two = await shared(store);
+      await one.a.verify("9in_at_same");
+      await two.a.verify("9in_at_same");
+      expect(one.introspections).toHaveLength(1);
+      expect(two.introspections).toHaveLength(1);
+      expect([...(store as unknown as { items: Map<string, unknown> }).items.keys()].every((k) => k.startsWith("9in:hybrid:"))).toBe(true);
+    });
   });
 });
 
