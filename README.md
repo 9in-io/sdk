@@ -37,8 +37,6 @@ comes from `@9in-io/sdk/server`. Guides are at [9in.io/docs](https://9in.io/docs
 | A `<script>` tag, no bundler | [`@9in-io/browser`](https://github.com/9in-io/browser) |
 | PHP or Laravel | [`9in/php-sdk`](https://github.com/9in-io/php-sdk), [`9in/laravel`](https://github.com/9in-io/laravel) |
 
-Moving from SSOfy? Read [Coming from SSOfy](https://9in.io/docs/coming-from-ssofy/).
-
 ## Sign users in (browser)
 
 ```ts
@@ -299,4 +297,4 @@ here at each release (one commit per version). Report bugs in
 
 ## License
 
-The MIT License (MIT). See [LICENSE](LICENSE). 9in and SSOfy are by [Cubelet Ltd](https://cubelet.co.uk).
+The MIT License (MIT). See [LICENSE](LICENSE). 9in is by [Cubelet Ltd](https://cubelet.co.uk).

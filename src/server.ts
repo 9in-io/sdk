@@ -319,8 +319,7 @@ async function cacheKey(token: string): Promise<string> {
 }
 
 /**
- * Token verification with a choice of trade-off between speed and revocation (SSOfy's
- * "hybrid" validation, kept): see `mode`.
+ * Token verification with a choice of trade-off between speed and revocation: see `mode`.
  *
  *   const verifier = createTokenVerifier({ issuer, audience: "https://api.acme.com", clientId, clientSecret });
  *   const claims = await verifier.verify(bearer, { scope: "orders:read" });
